@@ -1,0 +1,64 @@
+----------------------------------------
+Device 0: NVIDIA GeForce RTX 4080 SUPER
+  Compute capability: 8.9
+  Total global memory: 31.6 GiB
+  Multiprocessor count: 80
+Running benchmarks with target time: 3.0 seconds
+
+======================================== INT ========================================
+- mma_s4s4s32_8_8_32
+run: 3015.4 ms 659.5 T(fl)ops
+- mma_s8s8s32_16_16_16
+run: 3036.8 ms 390.8 T(fl)ops
+- mma_s8s8s32_32_8_16
+run: 3039.9 ms 390.5 T(fl)ops
+
+---------------------------------------- FP4 ----------------------------------------
+- mma_mxf4mxf4f32_16_8_64
+not supported
+- mma_nvf4nvf4f32_16_8_64
+not supported
+- mma_f4f4f16_16_8_32
+not supported
+- mma_f4f4f32_16_8_32
+not supported
+
+---------------------------------------- FP6 ----------------------------------------
+- mma_f6f6f16_16_8_32
+not supported
+- mma_f6f6f32_16_8_32
+not supported
+- mma_mxf6mxf6f32_16_8_32
+not supported
+
+---------------------------------------- FP8 ----------------------------------------
+- mma_mxf8mxf8f32_16_8_32
+not supported
+- mma_f8f8f16_16_8_32
+run: 3013.2 ms 377.4 T(fl)ops
+- mma_f8f8f32_16_8_32
+run: 2988.6 ms 201.8 T(fl)ops
+
+---------------------------------------- FP16 ----------------------------------------
+- mma_f16f16f16_16_16_16
+run: 3026.0 ms 202.0 T(fl)ops
+- mma_f16f16f16_32_8_16
+run: 2933.4 ms 202.5 T(fl)ops
+- mma_f16f16f32_16_16_16
+run: 3003.3 ms 101.5 T(fl)ops
+- mma_f16f16f32_32_8_16
+run: 3003.4 ms 101.5 T(fl)ops
+- mma_bf16bf16f32_16_16_16
+run: 3019.1 ms 101.2 T(fl)ops
+- mma_bf16bf16f32_32_8_16
+run: 3003.7 ms 101.2 T(fl)ops
+
+---------------------------------------- FP32 ----------------------------------------
+- mma_tf32tf32f32_16_16_8
+run: 3017.0 ms 50.6 T(fl)ops
+- fma_fp32 (scalar)
+fma_fp32: 3035.7 ms 40.3 T(fl)ops
+
+---------------------------------------- FP64 ----------------------------------------
+- fma_fp64 (scalar)
+fma_fp64: 2996.9 ms 0.7 T(fl)ops

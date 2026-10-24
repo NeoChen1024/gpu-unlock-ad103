@@ -250,4 +250,4 @@ module_init(gpu_unlock_init);
 module_exit(gpu_unlock_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Pre-driver BF16 unlock for GA10x and AD103");
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.1.0");

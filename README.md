@@ -1,12 +1,34 @@
-# GPU unlock 1.0.0
+# GPU unlock 1.1.0
 
-Unlock FP/BF16 instruction issue rate on Nvidia 3000's cards to their professional equivalents
+Unlock FP/BF16 instruction issue rate on Nvidia GA10x and AD103 consumer cards to their professional equivalents
+
+This is a fork of [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock)
+that adds AD103 support (RTX 4080 and 4080 SUPER) and a read-only preflight.
+The upstream module, packaging and GA10x behaviour are unchanged; the AD103
+work is additive.
 
 This Linux kernel module combines the CMP unlocker's V67/PLM technique with the pre-driver timing of the UEFI approach. It runs the unlock, writes the speed selectors (SS0 `0x88888888`, which selects the full BF16 rate, and the 4-bit SS1 `0x8` IMLA4) and performs FLR before the unmodified NVIDIA driver binds the card. It is neither a UEFI application nor a patched NVIDIA driver. 
 
 The benefit of this early kmod driver is that it does not require manual patching each time nvidia releases a new driver version.
 
-The effect of this unlock is that it doubles the instruction issuing speed of FP/BF16 FMA into FP32 operations on GA102, GA103, GA104 and GA106 cards.
+The effect of this unlock is that it doubles the instruction issuing speed of FP/BF16 FMA into FP32 operations on GA102, GA103, GA104, GA106 and AD103 cards.
+
+## Validated hardware
+
+RTX 4080 SUPER (`10de:2702`), 32 GB modified card, VBIOS `95.03.44.40.74`,
+driver `615.78.08`. Measured with `mmapeak`, one run per boot:
+
+| Kernel | Before (TFLOPS) | After (TFLOPS) |
+| --- | ---: | ---: |
+| BF16→FP32 `32_8_16` | 101.2 | 198.4 |
+| FP16→FP32 `32_8_16` | 101.5 | 202.7 |
+| TF32 | 50.6 | 99.2 |
+| FP8→FP32 | 201.8 | 376.1 |
+| FP16→FP16 | 202.5 | 201.8 |
+
+The full register, firmware and benchmark evidence is in
+[docs/VALIDATION.md](docs/VALIDATION.md); the supported IDs and their status
+are in [docs/HARDWARE.md](docs/HARDWARE.md).
 
 [3090 Ti dense 8192³ GEMM at 450 W, five-sample medians with FP32 accumulation](https://github.com/Zagitta/gpu-unlock/issues/1#issue-5905622687):
 
@@ -22,11 +44,9 @@ The effect of this unlock is that it doubles the instruction issuing speed of FP
 
 ## How to install
 
-First run:
+Clone this repository, then from its root run:
 
 ```sh
-git clone https://github.com/Zagitta/gpu-unlock
-cd gpu-unlock
 make install
 ```
 
@@ -102,20 +122,46 @@ There is no `softdep nvidia pre:` rule: kmod honours only the first
 The module does nothing unless the kernel command line opts in:
 
 ```
-gpu_unlock.targets=all                          # every unbound GA102/GA103/GA104/GA106 card
+gpu_unlock.targets=all                          # every unbound GA102/GA103/GA104/GA106/AD103 card
 gpu_unlock.targets=0000:21:00.0                 # only these cards
 gpu_unlock.targets=0000:21:00.0,0000:22:00.0    # comma-separated
 ```
 
 Addresses are full PCI names as `lspci -D` prints them (hex digits in either
 case), independent of GPU numbering and display role. An entry that is not
-a GA102/GA103/GA104/GA106 card, including `all` mixed with addresses, is logged and ignored.
+a GA102/GA103/GA104/GA106/AD103 card, including `all` mixed with addresses, is logged and ignored.
 The cards are unlocked concurrently, about a second in all however many
 there are, and each on its own: a card that is already bound or powered
 down is skipped. Bus mastering that the board firmware left on (Supermicro
 X11 does this whatever its option ROM and bus master settings) is cleared
 first; a card some driver already initialised is still refused. Then
 `nvidia` loads and binds every card as usual.
+
+AD103 (`0x2702` RTX 4080 SUPER, `0x2704` RTX 4080) is selected per card and
+uses the AD102 Booter, GSP boot image, `.fwsignature_ad10x` section and
+four-PLM payload instead of the GA102 ones. `0x2702` is validated with driver
+615.78.08 (see [docs/VALIDATION.md](docs/VALIDATION.md)); `0x2704` uses the
+same profile but has not been tested with this module. The four PLM values,
+the payload marker `0x67b00001` and the SEC2 debug value `0xda550000` are
+required after the Booter runs, and a mismatch fails the unlock before the
+FLR. Use the read-only preflight on a card that has not been tested yet.
+
+### Read-only preflight
+
+`gpu_unlock.dry_run=1` makes the module claim each selected card, read and
+log `PMC_BOOT_0`, the GFW/SEC2 state, `FEAT_OVR_PLM`, SS0/SS1, WPR2, the
+layout inputs, and the PROM/FWSEC geometry, then hand the card back. It
+writes no BAR0 register, starts no firmware, resets nothing and registers no
+resume handler, so `nvidia` binds the card as usual afterwards. Combine it
+with `targets` to check one card:
+
+```
+gpu_unlock.targets=0000:0a:00.0 gpu_unlock.dry_run=1
+```
+
+The `inspect:` lines in `journalctl -k -b` show the cold values the real
+unlock would act on, and whether the card's firmware geometry parsed. Remove
+`dry_run` to unlock.
 
 The display card works too. Its firmware framebuffer (the boot console and
 Plymouth) keeps running while the unlock's firmware steps run, and is
@@ -125,6 +171,16 @@ over.
 
 Loading the module by hand after boot does nothing to a card that `nvidia`
 has bound.
+
+With Secure Boot enabled the DKMS-signed module needs the local MOK key
+enrolled once:
+
+```sh
+sudo mokutil --import /var/lib/dkms/mok.pub   # then complete it at the next boot
+```
+
+Without enrollment the module still loads, but the kernel is tainted. On a
+system without Secure Boot the signature is not checked.
 
 Suspend to RAM powers the cards off, which resets the speed selectors. After
 resume the module unlocks every card it unlocked at boot again, before
@@ -157,14 +213,11 @@ The kernel module and local packaging are GPL-2.0-only. The generated payload
 derives from the pinned CMP reference; NVIDIA firmware remains under its own
 terms. See `firmware/NOTICE.md` and `licenses/` for attribution and notices.
 
-# Support me
+# Upstream and attribution
 
-Help me buy more GPUs <3
-
-[https://buymeacoffee.com/zagitta](https://buymeacoffee.com/zagitta)  
-
-ETH: 0xf4eee937937f92038D70B16AbD7736D8a53a1c5c
-
-BTC: bc1qwpkwp70fn76z3s4kg2l9y3j4kst95twcznuugf
-
-SOL: 8Rih6HY7V4LcdjYHz4iSffT4fTniqw5CACaBigSVxNYu
+The GA10x module, packaging and documentation come from
+[Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock); support that work
+through the links in the upstream repository. The AD102 payload table and the
+AD103 geometry are adapted from
+[TOTORONG/AD103_win_unlocker](https://huggingface.co/TOTORONG/AD103_win_unlocker).
+See `firmware/NOTICE.md` for licensing and provenance.

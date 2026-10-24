@@ -1,3 +1,10 @@
+gpu-unlock (1.1.0) unstable; urgency=medium
+
+  * Add AD103 support (RTX 4080 and 4080 SUPER), the AD102 firmware assets
+    and the read-only preflight mode.
+
+ -- Neo_Chen <chenkolei@gmail.com>  Sat, 24 Oct 2026 00:00:00 +0000
+
 gpu-unlock (1.0.0) UNRELEASED; urgency=medium
 
   * Initial release.

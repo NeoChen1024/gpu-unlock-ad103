@@ -8,6 +8,7 @@
 /licenses -export-ignore
 /packaging -export-ignore
 /tests -export-ignore
+/docs -export-ignore
 *.bin export-ignore
 *.cu export-ignore
 /debian -export-ignore

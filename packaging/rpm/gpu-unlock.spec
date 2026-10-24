@@ -1,9 +1,9 @@
 %global nv 610.43.03
 
 Name: gpu-unlock
-Version: 1.0.0
+Version: 1.1.0
 Release: 1%{?dist}
-Summary: RTX 3090 BF16 unlock before the NVIDIA driver loads
+Summary: GA10x/AD103 BF16 unlock before the NVIDIA driver loads
 License: GPL-2.0-only
 BuildArch: noarch
 Source0: gpu-unlock-%{version}.tar.xz
@@ -18,11 +18,12 @@ BuildRequires: python3
 BuildRequires: zstd
 
 %description
-Kernel module that unlocks RTX 3090 BF16 throughput before the unmodified
-NVIDIA driver binds, opted in on the kernel command line.
+Kernel module that unlocks FP/BF16 throughput on GA10x and AD103 cards
+before the unmodified NVIDIA driver binds, opted in on the kernel command
+line.
 
 %package dkms
-Summary: RTX 3090 BF16 unlock kernel source
+Summary: GA10x/AD103 BF16 unlock kernel source
 Requires: dkms
 Requires(post): dkms
 Requires(preun): dkms
@@ -131,5 +132,8 @@ if [ "$1" -eq 0 ]; then
 fi
 
 %changelog
+* Sat Oct 24 2026 Neo_Chen <chenkolei@gmail.com> - 1.1.0-1
+- Add AD103 support, the AD102 firmware assets and the read-only preflight.
+
 * Mon Sep 28 2026 Zagitta <zetlon+github@gmail.com> - 1.0.0-1
 - Initial release.
