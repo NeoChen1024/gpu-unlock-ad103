@@ -22,6 +22,17 @@ GPL version 2; the earlier manifest's MIT label was incorrect. That license is
 preserved in `licenses/GPL-2.0.txt`. The generated image is a separate file;
 the extracted NVIDIA images are never rewritten.
 
+The AD102 V67 word table and the AD103 asset/signature geometry are adapted
+from [TOTORONG/AD103_win_unlocker](https://huggingface.co/TOTORONG/AD103_win_unlocker),
+whose GPL-2.0-only code reuses this project's unlock sources. Only register
+offsets, firmware constants and the four-PLM payload table are used; that
+project's narrative documents are CC BY-NC-4.0 and are not copied. Its own
+results are the source of the AD103 observations encoded here: the FBPA PLM
+write is rejected, WPR_CFG/WPR/FEAT and both selectors reach their requested
+values, and the payload leaves marker `0x67b00001` and debug value
+`0xda550000`. Those checks gate an AD103 unlock in this module. No AD103
+hardware validation of this module has been published.
+
 NVIDIA source files inspected during the loader audit carry their own MIT
 copyright notices. The minimum helper's metadata layout and Falcon operations
 follow those source contracts; `licenses/NVIDIA-MIT.txt` preserves the notice.

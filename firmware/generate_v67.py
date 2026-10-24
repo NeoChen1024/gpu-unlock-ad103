@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Extract pinned 610.43.03 GA10x firmware and generate the rejoin15 V67 image."""
+"""Extract pinned 610.43.03 GA10x firmware and generate the GA102 and AD102 V67 images."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from pathlib import Path
 PACKAGE_SHA256 = "e17e7c92eeffa178b0fe1f40eb17a47095f8fc3ce4a77bf115cf5bd5a4df86e9"
 GSP_SHA256 = "572373620a37418f24dc16b5031c39338778c3257e48e8408de9a57291b24f3a"
 PAYLOAD_SHA256 = "2a0aa1f86d0b6afff5214d641d87d46dc98ef06ed908ff05d0ddbad5ffb7e197"
+AD102_PAYLOAD_SHA256 = "44c36b2d6b3424e53e18f3e55db85c833655de071ce66ce42749588a4a7dc8cb"
 PACKAGE_VERSION = "610.43.03-1"
 FIRMWARE_PREFIX = "usr/lib/firmware/nvidia/610.43.03/"
 MANIFEST = Path(__file__).with_name("artifacts-610.43.03.json")
@@ -41,6 +42,36 @@ PATCHED_WORDS = {
     0xF9D4: 0x00001FCE,
     0xF9E8: 0x00000D52,
     0xF9EC: 0x000081EE,
+}
+# AD102 Booter: one SEC2 run writes WPR_CFG, FBPA, WPR and FEAT_OVR PLMs, then
+# the marker 0x67b00001 to MAILBOX0. From TOTORONG/AD103_win_unlocker
+# source/firmware-tools/ad102_payload.py.
+AD102_PATCHED_WORDS = {
+    0x1100: 0x00000007,
+    0xF948: 0xFFFFF0FF,
+    0xF950: 0x000021B2,
+    0xF960: 0x001FA7CC,
+    0xF968: 0x000033FC,
+    0xF974: 0xFFFFFFFF,
+    0xF97C: 0x0000256F,
+    0xF980: 0x00007A02,
+    0xF984: 0x009A0148,
+    0xF98C: 0x000033FC,
+    0xF998: 0xFFFFFFFF,
+    0xF9A0: 0x0000256F,
+    0xF9A4: 0x00007A02,
+    0xF9A8: 0x001FA7C4,
+    0xF9B0: 0x000033FC,
+    0xF9BC: 0xFFFFFFFF,
+    0xF9C4: 0x0000256F,
+    0xF9C8: 0x00007A02,
+    0xF9CC: 0x00823804,
+    0xF9D4: 0x000033FC,
+    0xF9E0: 0x67B00001,
+    0xF9E8: 0x0000256F,
+    0xF9EC: 0x00007A02,
+    0xF9F8: 0x000031B5,
+    0xF9FC: 0x0000771E,
 }
 
 
@@ -85,10 +116,10 @@ def read_member(archive: tarfile.TarFile, name: str) -> bytes:
     return result
 
 
-def build_payload() -> bytes:
+def build_payload(words: dict[int, int] = PATCHED_WORDS) -> bytes:
     word = FILL_DWORD.to_bytes(4, "little")
     payload = bytearray(word * (PAYLOAD_SIZE // len(word)))
-    for offset, value in PATCHED_WORDS.items():
+    for offset, value in words.items():
         payload[offset : offset + 4] = value.to_bytes(4, "little")
     return bytes(payload)
 
@@ -117,6 +148,9 @@ def main() -> int:
     payload = build_payload()
     if sha256(payload) != PAYLOAD_SHA256:
         raise SystemExit("generated V67 image differs from its pinned SHA-256")
+    ad102_payload = build_payload(AD102_PATCHED_WORDS)
+    if sha256(ad102_payload) != AD102_PAYLOAD_SHA256:
+        raise SystemExit("generated AD102 V67 image differs from its pinned SHA-256")
     manifest = json.loads(MANIFEST.read_text())
     notice = manifest["source_artifacts"][2]["notice"]
     license_text = extract_member(args.package, notice["path"])
@@ -125,6 +159,7 @@ def main() -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "gsp_ga10x.bin").write_bytes(gsp)
     (args.output / "v67-ga102-610.43.03.bin").write_bytes(payload)
+    (args.output / "v67-ad102-610.43.03.bin").write_bytes(ad102_payload)
     (args.output / "NVIDIA-LICENSE").write_bytes(license_text)
     return 0
 

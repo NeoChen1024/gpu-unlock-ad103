@@ -19,6 +19,19 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(digest, generate_v67.PAYLOAD_SHA256)
         self.assertEqual(digest, self.manifest()["generated_payload"]["sha256"])
 
+    def test_ad102_payload_matches_pin(self):
+        payload = generate_v67.build_payload(generate_v67.AD102_PATCHED_WORDS)
+        digest = hashlib.sha256(payload).hexdigest()
+        self.assertEqual(digest, generate_v67.AD102_PAYLOAD_SHA256)
+        self.assertEqual(len(payload), generate_v67.PAYLOAD_SIZE)
+        self.assertNotEqual(digest, generate_v67.PAYLOAD_SHA256)
+        # The four PLM targets and the completion marker from the AD102 payload.
+        self.assertEqual(generate_v67.AD102_PATCHED_WORDS[0xF960], 0x001FA7CC)
+        self.assertEqual(generate_v67.AD102_PATCHED_WORDS[0xF984], 0x009A0148)
+        self.assertEqual(generate_v67.AD102_PATCHED_WORDS[0xF9A8], 0x001FA7C4)
+        self.assertEqual(generate_v67.AD102_PATCHED_WORDS[0xF9CC], 0x00823804)
+        self.assertEqual(generate_v67.AD102_PATCHED_WORDS[0xF9E0], 0x67B00001)
+
     def test_install_uses_standard_paths(self):
         version = (ROOT / "VERSION").read_text().strip()
         with tempfile.TemporaryDirectory() as directory:

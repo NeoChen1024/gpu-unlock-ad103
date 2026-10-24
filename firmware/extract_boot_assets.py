@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Build the Booter and GSP boot assets from the pinned 610 generated source."""
+"""Build the GA102 and AD102 Booter and GSP boot assets from the pinned 610 generated source."""
 from __future__ import annotations
 
 import argparse
@@ -95,21 +95,28 @@ def build_bundle(source_text: str) -> bytes:
     return prefix + image + signatures
 
 
+# Booter and GSP boot sources per chip family: GA102 serves GA10x, AD102 AD10x.
 PINNED = {
-    'g_bindata_kgspGetBinArchiveBooterLoadUcode_GA102.c': '04cd3db7f670adc4efd79d2e76217bb809fffddfbd6f1af884cde2af26dd39af',
-    'g_bindata_kgspGetBinArchiveGspRmBoot_GA102.c': '35e5aa9075ad3898b6022ffd5820c953d809caa7dabd530cfc1a83dc2a67c5bd',
+    'GA102': {
+        'g_bindata_kgspGetBinArchiveBooterLoadUcode_GA102.c': '04cd3db7f670adc4efd79d2e76217bb809fffddfbd6f1af884cde2af26dd39af',
+        'g_bindata_kgspGetBinArchiveGspRmBoot_GA102.c': '35e5aa9075ad3898b6022ffd5820c953d809caa7dabd530cfc1a83dc2a67c5bd',
+    },
+    'AD102': {
+        'g_bindata_kgspGetBinArchiveBooterLoadUcode_AD102.c': '0504f640bc36d03c3b617b1d80cf6eee1c8022cdfffb52ed22405aaa316a1460',
+        'g_bindata_kgspGetBinArchiveGspRmBoot_AD102.c': 'da110719ed6b680f26f3f7158f6731d1ff20fa859857238e23ac4935bd4cd91c',
+    },
 }
 
 
-def extract_assets(source_root: Path, output: Path) -> None:
+def extract_chip(source_root: Path, chip: str) -> dict[str, bytes]:
     inputs = {}
-    for name, digest in PINNED.items():
+    for name, digest in PINNED[chip].items():
         data = (source_root / 'src/nvidia/generated' / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
             raise ValueError('pinned generated source mismatch: ' + name)
         inputs[name] = data.decode('ascii')
-    booter = build_bundle(inputs['g_bindata_kgspGetBinArchiveBooterLoadUcode_GA102.c'])
-    boot = inputs['g_bindata_kgspGetBinArchiveGspRmBoot_GA102.c']
+    booter = build_bundle(inputs[f'g_bindata_kgspGetBinArchiveBooterLoadUcode_{chip}.c'])
+    boot = inputs[f'g_bindata_kgspGetBinArchiveGspRmBoot_{chip}.c']
     image = _array_bytes(boot, 'UCODE_IMAGE_PROD')[0]
     desc = _array_bytes(boot, 'UCODE_DESC_PROD')[0]
     if len(desc) != 84:
@@ -120,8 +127,18 @@ def extract_assets(source_root: Path, output: Path) -> None:
     for index in (1,3,8,10,12):
         if not fields[index+1] or fields[index]+fields[index+1] > len(image):
             raise ValueError('bootloader descriptor range outside image')
-    blobs = {'booter_load_ga102.bin': booter, 'gsp_boot_ga102.bin': image, 'gsp_boot_desc_ga102.bin': desc}
+    lower = chip.lower()
+    return {f'booter_load_{lower}.bin': booter, f'gsp_boot_{lower}.bin': image,
+            f'gsp_boot_desc_{lower}.bin': desc}
+
+
+def extract_assets(source_root: Path, output: Path) -> None:
+    blobs = {}
+    for chip in PINNED:
+        blobs.update(extract_chip(source_root, chip))
     pinned = json.loads(MANIFEST.read_text())['derived_assets']
+    if set(blobs) != set(pinned):
+        raise ValueError('derived assets differ from the pinned list')
     for name, data in blobs.items():
         if hashlib.sha256(data).hexdigest() != pinned[name]:
             raise ValueError('derived asset differs from its pinned SHA-256: ' + name)
