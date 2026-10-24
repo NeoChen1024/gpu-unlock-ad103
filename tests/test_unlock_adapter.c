@@ -574,6 +574,50 @@ int main(int argc, char **argv) {
             .dmem_size=256,.dmem_pa=1u<<24};
         assert(gpu_unlock_fwsec_dmem_transfer(&fw,&bytes)==-ERANGE);
     }
+    /* The read-only preflight takes observations and gives the card back. */
+    for(int mode=0;mode<4;mode++) {
+        setup(&w);
+        load_rom(NULL);
+        regs[0]=0x172000a1;
+        regs[GU_GFW_PLM_OFFSET/4]=1;regs[GU_GFW_BOOT_OFFSET/4]=0xff;
+        regs[GU_GFW_CPUCTL_OFFSET/4]=0x10;regs[GU_FEAT_PLM_OFFSET/4]=0xffffff8f;
+        regs[GU_FEAT_SS0_OFFSET/4]=0x40171022;regs[GU_FEAT_SS1_OFFSET/4]=0x2;
+        regs[0x1fa824/4]=0xfffffff0;regs[0x1fa828/4]=0;
+        regs[0x1183a4/4]=0x6000;regs[0x625f04/4]=1;regs[0x1fa7c8/4]=0x45cb8f;
+        regs[0x1fa82c/4]=0x100000;regs[0x1fa830/4]=0x5cffff0;
+        if(mode==1){memset((u8 *)regs+0x300000,0,1024);} /* no FWSEC in PROM */
+        if(mode==2)fake.cmd=0;                           /* firmware left MEMORY off */
+        if(mode==3)fake.fail_map=1;
+        int ret=gpu_unlock_610_inspect(&dev);
+        assert(ret==(mode==3?-ENOMEM:0));
+        assert(!fake.writes && !fake.flrs && !fake.starts && !fake.gsp_starts);
+        assert(!fake.allocs && !fake.apertures && !fake.regions);
+        if(mode!=3)assert(strstr(fake.log,"inspect: PMC_BOOT_0=0x172000a1 expected=0x172000a1 matched=1"));
+        if(mode==0){
+            /* One read per register, the 1 MiB PROM window and its FWSEC. */
+            assert(strstr(fake.log,"inspect: GFW_PLM offset=0x118128 value=0x1"));
+            assert(strstr(fake.log,"inspect: SS0 offset=0x82381c value=0x40171022"));
+            assert(strstr(fake.log,"inspect: gfw_assess=0 cold=1 wpr2_up=0 already_unlocked=0"));
+            assert(strstr(fake.log,"inspect: PROM bytes=1048576 fwsec image=0x500"));
+            assert(strstr(fake.log,"engine=0x400 ucode=9"));
+            assert(strstr(fake.log,"inspect: PCI command restored to 0x2"));
+        }
+        if(mode==1)assert(strstr(fake.log,"inspect: PROM bytes=1048576 fwsec=error"));
+        if(mode==2)assert(strstr(fake.log,"inspect: PCI command restored to 0") && fake.cmd==0);
+        if(mode==3)assert(strstr(fake.log,"inspect: PCI command restored to 0x2"));
+        assert(dev.refs==1);
+    }
+    /* A bound card is not touched at all. */
+    setup(&w);dev.driver=(void *)1;
+    assert(gpu_unlock_610_inspect(&dev)==-EBUSY);
+    assert(!fake.writes && !fake.regions && !fake.starts && !fake.allocs);
+    assert(strstr(fake.log,"inspect: profile=GA102 chip=0x172000a1 bound=1"));
+    /* The AD103 preflight reads its shorter PROM view and picks its profile. */
+    setup(&w);load_rom(NULL);dev.device=GU_PCI_AD103_4080_SUPER;regs[0]=0x193000a1;
+    assert(!gpu_unlock_610_inspect(&dev));
+    assert(strstr(fake.log,"inspect: profile=AD103 chip=0x193000a1 bound=0"));
+    assert(strstr(fake.log,"inspect: PROM bytes=879616"));
+    assert(!fake.writes && !fake.regions && !fake.starts && !fake.allocs);
     /* Failed FLR/reset/BAR checks retain allocations; success excludes fetches. */
     for(int failure=0;failure<10;failure++) {
         setup(&w);w.firmware_started=true;w.original_cmd=2;w.cmd_valid=true;

@@ -37,4 +37,11 @@ void gpu_unlock_610_release_shared(struct gpu_unlock_610_shared *shared);
 int gpu_unlock_610_unlock(struct pci_dev *pdev, const struct gpu_unlock_610_shared *shared,
 			  bool resume);
 
+/*
+ * Read-only preflight for a cold, unbound card: log its chip, cold registers,
+ * PROM and FWSEC geometry, then hand it back. Writes no BAR0 register, starts
+ * no firmware and resets nothing. Returns 0 when the observations were taken.
+ */
+int gpu_unlock_610_inspect(struct pci_dev *pdev);
+
 #endif

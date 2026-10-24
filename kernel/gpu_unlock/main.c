@@ -18,6 +18,10 @@ static bool resume = true;
 module_param(resume, bool, 0644);
 MODULE_PARM_DESC(resume, "Unlock the cards again after resume from suspend, which powers them off (default: on)");
 
+static bool dry_run;
+module_param(dry_run, bool, 0444);
+MODULE_PARM_DESC(dry_run, "Only read and log each target card's cold registers and firmware geometry, without writing to it (default: off)");
+
 /* GA102, GA103, GA104, GA106 and AD103 GPU functions in pci.ids, excluding
  * audio functions and the professional (GL) parts, which already run BF16 at
  * full rate. GA103 and GA106 also exclude mobile parts. AD103 is limited to
@@ -186,6 +190,7 @@ static int __init gpu_unlock_init(void)
 	struct pci_dev *pdev = NULL;
 	struct card *card, *next;
 	bool all;
+	int ret;
 
 	/* Loaded ahead of nvidia on every boot; the command line is the opt-in. */
 	if (!targets || !*targets)
@@ -203,6 +208,23 @@ static int __init gpu_unlock_init(void)
 		}
 		card->pdev = pci_dev_get(pdev);
 		list_add_tail(&card->node, &cards);
+	}
+	if (dry_run) {
+		/* Observation only: the cards are handed back untouched and are
+		 * not kept for a resume unlock. */
+		list_for_each_entry(card, &cards, node) {
+			pci_dev_lock(card->pdev);
+			ret = card->pdev->driver ? -EBUSY :
+				gpu_unlock_610_inspect(card->pdev);
+			pci_dev_unlock(card->pdev);
+			if (ret)
+				pci_err(card->pdev, "gpu_unlock: inspection failed (%d)\n", ret);
+			else
+				pci_info(card->pdev, "gpu_unlock: inspection complete\n");
+		}
+		list_for_each_entry_safe(card, next, &cards, node)
+			drop_card(card);
+		return 0;
 	}
 	/* nvidia loads once this returns: every card must be finished by then. */
 	unlock_cards(unlock_one);

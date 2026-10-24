@@ -1563,6 +1563,161 @@ int gpu_unlock_610_load_shared(struct pci_dev *pdev, struct gpu_unlock_610_share
 	return request_scoped(&pdev->dev, &shared->gsp, GSP_FILE);
 }
 
+/* Log one read unconditionally: a cold card under GFW may not answer yet. */
+static u32 inspect_value(struct unlock_transaction_work *work, const char *name, u32 offset)
+{
+	u32 value = 0;
+
+	if (read_bar(work, offset, &value)) {
+		dev_info(&work->pdev->dev, "inspect: %s offset=%#x unreadable\n", name, offset);
+		return 0;
+	}
+	dev_info(&work->pdev->dev, "inspect: %s offset=%#x value=%#x\n", name, offset, value);
+	return value;
+}
+
+/*
+ * Cold preflight for the card the unlock would claim: map BAR0, read the
+ * registers and PROM, and log what the unlock would see. BAR0 registers are
+ * only read here, no firmware is started and no reset is issued.
+ */
+int gpu_unlock_610_inspect(struct pci_dev *pdev)
+{
+	const struct unlock_profile *profile = unlock_profile(pdev->device);
+	struct unlock_transaction_work *work;
+	struct gpu_unlock_fwsec fw;
+	u16 command = 0xffff, original = 0;
+	bool command_read = false, enabled = false, region = false;
+	u32 chip, plm, boot, cpuctl, feat_plm, ss0, ss1, wpr_hi;
+	u32 fb_mb, vga, mmu_plm, mmu_lo, mmu_hi;
+	size_t prom_bytes = 0;
+	u8 *rom = NULL;
+	int ret = 0;
+
+	work = kzalloc(sizeof(*work), GFP_KERNEL);
+	if (!work)
+		return -ENOMEM;
+	work->pdev = pci_dev_get(pdev);
+	work->profile = profile;
+	dev_info(&pdev->dev, "inspect: profile=%s chip=%#x bound=%u\n",
+		 profile->name, profile->chip_id, pdev->driver != NULL);
+	if (pdev->driver) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (diag_pci_word(work, false, PCI_COMMAND, &command) || command == 0xffff) {
+		ret = -ENODEV;
+		goto out;
+	}
+	original = command;
+	command_read = true;
+	dev_info(&pdev->dev, "inspect: command=%#x\n", command);
+	ret = pci_request_region(pdev, 0, "gpu_unlock");
+	if (ret)
+		goto out;
+	region = true;
+	if (!(command & GU_PCI_COMMAND_MEMORY)) {
+		ret = pci_enable_device_mem(pdev);
+		if (ret)
+			goto out;
+		enabled = true;
+	}
+	work->bar_len = pci_resource_len(pdev, 0);
+	if (work->bar_len < SEC2_FALCON2 + 0x1000) {
+		ret = -EINVAL;
+		goto out;
+	}
+	work->bar = pci_iomap(pdev, 0, 0);
+	if (!work->bar) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	work->mapped = true;
+	if (read_bar(work, 0, &chip)) {
+		ret = -EIO;
+		goto out;
+	}
+	dev_info(&pdev->dev, "inspect: PMC_BOOT_0=%#x expected=%#x matched=%u\n",
+		 chip, profile->chip_id, chip == profile->chip_id);
+	plm = inspect_value(work, "GFW_PLM", GU_GFW_PLM_OFFSET);
+	boot = inspect_value(work, "GFW_BOOT", GU_GFW_BOOT_OFFSET);
+	cpuctl = inspect_value(work, "GFW_CPUCTL", GU_GFW_CPUCTL_OFFSET);
+	feat_plm = inspect_value(work, "FEAT_PLM", GU_FEAT_PLM_OFFSET);
+	ss0 = inspect_value(work, "SS0", GU_FEAT_SS0_OFFSET);
+	ss1 = inspect_value(work, "SS1", GU_FEAT_SS1_OFFSET);
+	inspect_value(work, "WPR2_LOW", 0x001fa824);
+	wpr_hi = inspect_value(work, "WPR2_HIGH", 0x001fa828);
+	fb_mb = inspect_value(work, "FB_MB", 0x001183a4);
+	vga = inspect_value(work, "VGA_WORKSPACE", 0x00625f04);
+	mmu_plm = inspect_value(work, "MMU_PLM", 0x001fa7c8);
+	mmu_lo = inspect_value(work, "MMU_LOCK_LOW", 0x001fa82c);
+	mmu_hi = inspect_value(work, "MMU_LOCK_HIGH", 0x001fa830);
+	/* The same entry sample unlock_transaction_gfw assesses. */
+	{
+		struct gpu_unlock_gfw_sample sample = {
+			.config_ok = true, .plm = plm, .boot = boot, .cpuctl = cpuctl,
+		};
+		int assessed = gpu_unlock_gfw_assess(&sample);
+
+		dev_info(&pdev->dev, "inspect: gfw_assess=%d cold=%u wpr2_up=%u already_unlocked=%u\n",
+			 assessed, assessed == 0,
+			 !inaccessible(wpr_hi) && (wpr_hi >> 4),
+			 ss0 == GU_SS0_UNLOCK && ss1 == GU_SS1_UNLOCK);
+	}
+	dev_info(&pdev->dev,
+		 "inspect: fb_mb=%#x vga=%#x mmu_plm=%#x mmu_lo=%#x mmu_hi=%#x ss0=%#x ss1=%#x feat_plm=%#x\n",
+		 fb_mb, vga, mmu_plm, mmu_lo, mmu_hi, ss0, ss1, feat_plm);
+	if (work->bar_len > 0x300000) {
+		prom_bytes = min_t(size_t, profile->prom_view, work->bar_len - 0x300000);
+		rom = kvmalloc(prom_bytes, GFP_KERNEL);
+		if (!rom) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		memcpy_fromio(rom, work->bar + 0x300000, prom_bytes);
+		ret = gpu_unlock_vbios_fwsec(rom, prom_bytes, &fw);
+		if (ret) {
+			dev_info(&pdev->dev, "inspect: PROM bytes=%zu fwsec=error %d\n",
+				 prom_bytes, ret);
+			ret = 0;
+		} else {
+			u32 transfer = 0;
+			int dmem = gpu_unlock_fwsec_dmem_transfer(&fw, &transfer);
+
+			dev_info(&pdev->dev,
+				 "inspect: PROM bytes=%zu fwsec image=%#x imem=%#x/%#x dmem=%#x/%#x transfer=%#x dmem_error=%d engine=%#x ucode=%u signatures=%u\n",
+				 prom_bytes, fw.image_size, fw.imem_size, fw.imem_pa,
+				 fw.dmem_size, fw.dmem_pa, transfer, dmem,
+				 fw.engine_mask, fw.ucode_id, fw.sig_count);
+		}
+	}
+out:
+	kvfree(rom);
+	if (work->mapped) {
+		pci_iounmap(pdev, work->bar);
+		work->bar = NULL;
+		work->mapped = false;
+	}
+	if (region) {
+		pci_release_region(pdev, 0);
+		region = false;
+	}
+	if (enabled) {
+		pci_disable_device(pdev);
+		enabled = false;
+	}
+	if (command_read) {
+		if (diag_pci_word(work, false, PCI_COMMAND, &command) ||
+		    (command != original && pci_write_config_word(pdev, PCI_COMMAND, original)))
+			dev_err(&pdev->dev, "inspect: PCI command not restored to %#x\n", original);
+		else
+			dev_info(&pdev->dev, "inspect: PCI command restored to %#x\n", original);
+	}
+	pci_dev_put(work->pdev);
+	kfree(work);
+	return ret;
+}
+
 void gpu_unlock_610_release_shared(struct gpu_unlock_610_shared *shared)
 {
 	release_firmware(shared->gsp);

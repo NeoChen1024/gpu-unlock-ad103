@@ -33,6 +33,7 @@ static struct {
 	int expected_concurrent; /* unlocks that must overlap */
 	int unlocks[MAX_DEVICES], fail_unlock[MAX_DEVICES];
 	int resumes[MAX_DEVICES], fail_resume[MAX_DEVICES];
+	int inspects[MAX_DEVICES], fail_inspect[MAX_DEVICES];
 	struct notifier_block *nb;
 	int registrations;
 	char log[16384];
@@ -128,6 +129,19 @@ void async_synchronize_full_domain(struct async_domain *domain)
 		assert(!pthread_join(domain->threads[i], NULL));
 	domain->count = 0;
 	pthread_mutex_unlock(&domain->lock);
+}
+
+int gpu_unlock_610_inspect(struct pci_dev *pdev)
+{
+	unsigned int index = pdev - devices;
+
+	/* Read-only preflight runs the same way, and only for an unbound card. */
+	assert(!pdev->driver);
+	assert(pdev->locked && pthread_equal(pdev->owner, pthread_self()));
+	pthread_mutex_lock(&fake_lock);
+	fake.inspects[index]++;
+	pthread_mutex_unlock(&fake_lock);
+	return fake.fail_inspect[index];
 }
 
 int gpu_unlock_610_load_shared(struct pci_dev *pdev, struct gpu_unlock_610_shared *shared)
@@ -349,6 +363,22 @@ int main(void)
 	assert(fake.max_in_flight == 2 && fake.unlocks[0] && fake.unlocks[1]);
 	assert(fake.loads == 1 && fake.load_dev == &devices[0] && fake.releases == 1);
 	puts("all: AD103 cards unlocked PASS");
+
+	/* dry_run inspects each target and keeps none: no firmware, no notifier. */
+	reset("all");
+	add("0000:01:00.0", RTX_3090, false);
+	add("0000:0a:00.0", GU_PCI_AD103_4080_SUPER, false);
+	add("0000:41:00.0", RTX_3090, true);
+	dry_run = true;
+	fake.fail_inspect[0] = -EIO;
+	run();
+	assert(fake.inspects[0] == 1 && fake.inspects[1] == 1 && !fake.inspects[2]);
+	assert(!fake.started && !fake.loads && !fake.releases && !fake.registrations && !fake.nb);
+	assert(logged("0000:01:00.0: gpu_unlock: inspection failed (-5)"));
+	assert(logged("0000:0a:00.0: gpu_unlock: inspection complete"));
+	assert(logged("0000:41:00.0: gpu_unlock: inspection failed (-16)"));
+	dry_run = false;
+	puts("dry run: read-only inspection of every target PASS");
 
 	/* After resume, the cards unlocked at boot, concurrently, and all of them
 	 * finished before the notifier returns. A card that failed at boot is not
