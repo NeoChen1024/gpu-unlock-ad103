@@ -1,6 +1,7 @@
 # `make dist` ships only the source needed to build and test the packages.
 /* export-ignore
 /VERSION -export-ignore
+/LICENSE -export-ignore
 /Makefile -export-ignore
 /README.md -export-ignore
 /firmware -export-ignore
