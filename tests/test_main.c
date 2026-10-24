@@ -340,6 +340,16 @@ int main(void)
 	}
 	puts("no targets: idle PASS");
 
+	/* The AD103 desktop parts are offered like GA10x cards. */
+	reset("all");
+	add("0000:0a:00.0", GU_PCI_AD103_4080_SUPER, false);
+	add("0000:0b:00.0", GU_PCI_AD103_4080, false);
+	fake.expected_concurrent = 2;
+	run();
+	assert(fake.max_in_flight == 2 && fake.unlocks[0] && fake.unlocks[1]);
+	assert(fake.loads == 1 && fake.load_dev == &devices[0] && fake.releases == 1);
+	puts("all: AD103 cards unlocked PASS");
+
 	/* After resume, the cards unlocked at boot, concurrently, and all of them
 	 * finished before the notifier returns. A card that failed at boot is not
 	 * tried again; suspending does nothing. */

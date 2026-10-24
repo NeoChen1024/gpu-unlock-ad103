@@ -17,7 +17,6 @@ typedef uint64_t u64;
 
 #include "layout_610.h"
 
-#define GU_BOOTER_IMAGE_SIZE 60416u
 #define GU_BOOTER_SIG_TOTAL 768u
 #define GU_V67_SIZE 0xfa00u
 #define GU_WPR_META_SIZE 256u

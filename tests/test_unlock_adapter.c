@@ -5,7 +5,7 @@
 #define __KERNEL__
 #include "../kernel/gpu_unlock/unlock_610.c"
 #include "vbios_fixture.h"
-static u32 regs[0x900000/4];
+static u32 regs[0xa00000/4];
 static const char *asset_root;
 static struct unlock_transaction_work *last_work;
 static bool full_active;
@@ -49,6 +49,7 @@ static void setup(struct unlock_transaction_work *w) {
     memset(&fake,0,sizeof(fake)); memset(regs,0,sizeof(regs)); memset(w,0,sizeof(*w));
     mask=0xffffffffffffull; dev=(struct pci_dev){.dev={.dma_mask=&mask,.coherent_dma_mask=0xfffffffffull},.vendor=0x10de,.device=0x2204,.refs=1};
     w->pdev=&dev; w->bar=regs; w->bar_len=sizeof(regs); w->mapped=true;
+    w->profile=unlock_profile(dev.device);
     fake.cmd=2;fake.saved=2;regs[(SEC2_BASE+0xf4)/4]=1u<<31;regs[(0x110000+0xf4)/4]=1u<<31;
     regs[(SEC2_BASE+0x118)/4]=2;regs[(0x110000+0x118)/4]=2;
     regs[GU_FEAT_SS0_OFFSET/4]=0x88888888;regs[GU_FEAT_SS1_OFFSET/4]=0;
@@ -118,6 +119,15 @@ void writel(u32 v,void *p) {
         if(fake.boot_mode==0)regs[GU_FEAT_PLM_OFFSET/4]=~0u;
         if(fake.boot_mode==2)regs[(SEC2_BASE+0x100)/4]=~0u;
         if(fake.boot_mode==3)regs[(SEC2_BASE+0x100)/4]=0x10;
+        if(ad103_device(dev.device)) {
+            /* The AD102 payload writes four PLMs, the marker and exits. */
+            regs[(SEC2_BASE+0x40)/4]=0x67b00001;
+            regs[(SEC2_BASE+0x94)/4]=0xda550000;
+            regs[0x1fa7cc/4]=0xfffff0ff;
+            regs[0x9a0148/4]=0xffffff0f;
+            regs[0x1fa7c4/4]=0xffffffff;
+            regs[(SEC2_BASE+0x100)/4]=0x10;
+        }
     }
     if(fake.fail_reset==2 && (off==SEC2_BASE+0x3c0 || off==0x1103c0))regs[off/4]=0;
     if(fake.fail_reset==8 && (off==SEC2_BASE+0x3c0 || off==0x1103c0))regs[off/4]=0xbadf0001;
@@ -169,7 +179,7 @@ void release_firmware(const struct firmware *f) {if(f){free((void *)f->data);fre
 void __module_get(void *p) {fake.pins++;}
 int pci_read_config_word(struct pci_dev *p,int r,u16 *v) {*v=r==PCI_COMMAND?fake.cmd:r==PCI_VENDOR_ID?0x10de:0;return 0;}
 int pci_read_config_dword(struct pci_dev *p,int r,u32 *v) {
-    *v=r==PCI_VENDOR_ID?(fake.flrs && fake.lost_identity?~0u:0x220410de):(u32)fake.bar_bad;return 0;
+    *v=r==PCI_VENDOR_ID?(fake.flrs && fake.lost_identity?~0u:(u32)dev.device<<16|dev.vendor):(u32)fake.bar_bad;return 0;
 }
 int pci_write_config_word(struct pci_dev *p,int r,u16 v) {assert(r==PCI_COMMAND);fake.cmd=v|(fake.master_stuck?4:0);return 0;}
 int pcie_capability_read_word(struct pci_dev *p,int r,u16 *v) {*v=r==PCI_EXP_DEVSTA?fake.pending:0;return 0;}
@@ -235,11 +245,22 @@ static const u8 *dma_page(u64 address) {
 static void check_published_image(void) {
     struct unlock_transaction_work *w=last_work;const u8 *meta=w->meta_cpu;
     assert(w->published && !fake.pins && (fake.cmd&4));
+    if(ad103_device(w->pdev->device)) {
+        assert(w->profile==&ad103_profile);
+        assert(w->booter_image_size==56832 && w->boot_fw->size==36864);
+        /* .fwsignature_ad10x, not the GA10x section one page later. */
+        assert(w->sig_span.offset==0x505d06e && w->sig_span.size==4096);
+    } else {
+        assert(w->profile==&ga102_profile);
+        assert(w->booter_image_size==60416 && w->boot_fw->size==24576);
+        assert(w->sig_span.offset==0x505e06e);
+    }
     assert(get64(meta)==GU_WPR_META_MAGIC && get64(meta+8)==1);
     assert(get64(meta+72)==w->v67_dma && get64(meta+80)==GU_V67_SIZE);
     assert(!memcmp(w->v67_cpu,w->v67_fw->data,GU_V67_SIZE));
     assert(get64(meta+112)==0x5f5400000ull && get64(meta+136)==0x5fada0000ull);
-    assert(get64(meta+144)==0x5ffdfa000ull && get64(meta+152)==0x5ffe00000ull);
+    u64 boot_expected = w->boot_desc.image_size == 36864 ? 0x5ffdf7000ull : 0x5ffdfa000ull;
+    assert(get64(meta+144)==boot_expected && get64(meta+152)==0x5ffe00000ull);
     assert(get64(meta+168)==0x5fff00000ull && get64(meta+176)==0x600000000ull);
     /* Independently walk the radix the way a firmware consumer does. Compare
      * every published image byte, including transitions across 512-entry tables. */
@@ -255,7 +276,8 @@ static void check_published_image(void) {
     }
     assert(!memcmp(w->boot_cpu,w->boot_fw->data,w->boot_desc.image_size));
     /* SEC2 fuse v1 selects slot 0 of the two-signature Booter asset. */
-    assert(!memcmp((u8 *)w->booter_cpu+35344,w->booter_fw->data+72+60416,384));
+    assert(!memcmp((u8 *)w->booter_cpu+w->booter_hdr.patch_loc,
+                   w->booter_fw->data+72+w->booter_image_size,384));
 }
 static void check_restored_signature(void) {
     struct unlock_transaction_work *w=last_work;const u8 *meta=w->meta_cpu;
@@ -507,6 +529,51 @@ int main(int argc, char **argv) {
         if(mode==2)assert(ret==-ENODEV);
         if(mode==3)assert(ret==-EIO);
     }
+    /* The PCI device selects the assets and the AD103-only verification. */
+    assert(unlock_profile(0x2204)==&ga102_profile && !ga102_profile.boot_marker);
+    assert(unlock_profile(GU_PCI_AD103_4080)==&ad103_profile);
+    assert(unlock_profile(GU_PCI_AD103_4080_SUPER)==&ad103_profile);
+    assert(ad103_profile.boot_marker==0x67b00001u);
+    assert(ga102_profile.booter_image_size==60416 && ad103_profile.booter_image_size==56832);
+    for(int mode=0;mode<8;mode++) {
+        setup(&w);
+        dev.device=GU_PCI_AD103_4080_SUPER;w.profile=&ad103_profile;
+        regs[(SEC2_BASE+0x100)/4]=0x10;
+        regs[(SEC2_BASE+0x40)/4]=0x67b00001;
+        regs[(SEC2_BASE+0x94)/4]=0xda550000;
+        regs[0x1fa7cc/4]=0xfffff0ff;
+        regs[0x9a0148/4]=0xffffff0f; /* rejected write, nonfatal */
+        regs[0x1fa7c4/4]=0xffffffff;
+        regs[GU_FEAT_PLM_OFFSET/4]=0xffffffff;
+        if(mode==1)regs[(SEC2_BASE+0x40)/4]=0;      /* no marker */
+        if(mode==2)regs[(SEC2_BASE+0x94)/4]=0;      /* no exit evidence */
+        if(mode==3)regs[0x1fa7cc/4]=0;              /* WPR_CFG rejected */
+        if(mode==4)regs[0x9a0148/4]=0;              /* FBPA rejected: still success */
+        if(mode==5)regs[0x1fa7c4/4]=0;              /* WPR rejected */
+        if(mode==6)regs[(SEC2_BASE+0x100)/4]=0;     /* never halts */
+        if(mode==7)regs[0x1fa7c4/4]=0xbadf0000;     /* protected read */
+        int ret=unlock_transaction_verify_ad103(&w);
+        assert((!ret)==(mode==0 || mode==4));
+        if(mode==4)assert(strstr(fake.log,"FBPA=0 expected=0xffffffff matched=0 required=0"));
+        if(mode==6)assert(ret==-ETIMEDOUT);
+        if(mode==7)assert(ret==-ENODEV);
+        assert(!fake.writes && !fake.starts);
+    }
+    /* DMEM transfers are rounded to whole 256-byte packets. */
+    {
+        struct gpu_unlock_fwsec fw={.image_size=4096,.data_off=1024,
+            .dmem_size=1024+17,.dmem_pa=0};
+        u32 bytes=0;
+        assert(!gpu_unlock_fwsec_dmem_transfer(&fw,&bytes) && bytes==1280);
+        fw.dmem_size=4096-1024+1; /* rounded past the image */
+        assert(gpu_unlock_fwsec_dmem_transfer(&fw,&bytes)==-ERANGE);
+        fw=(struct gpu_unlock_fwsec){.image_size=4096,.data_off=1025,
+            .dmem_size=256,.dmem_pa=0};
+        assert(gpu_unlock_fwsec_dmem_transfer(&fw,&bytes)==-EINVAL);
+        fw=(struct gpu_unlock_fwsec){.image_size=4096,.data_off=1024,
+            .dmem_size=256,.dmem_pa=1u<<24};
+        assert(gpu_unlock_fwsec_dmem_transfer(&fw,&bytes)==-ERANGE);
+    }
     /* Failed FLR/reset/BAR checks retain allocations; success excludes fetches. */
     for(int failure=0;failure<10;failure++) {
         setup(&w);w.firmware_started=true;w.original_cmd=2;w.cmd_valid=true;
@@ -714,6 +781,41 @@ int main(int argc, char **argv) {
             printf("full transaction %s: error=%d retained=%u PASS\n",cases[scenario],ret,retained);
         }
         puts("pinned firmware full BF16 transactions passed under mocked hardware");
+
+        /* The same production transaction for AD103: different Booter, boot
+         * image, signature section and PROM view, verified through the real
+         * assets. The mocked card keeps the 24 GiB layout the arithmetic
+         * checks above already cover. */
+        setup(&w);
+        dev.device=GU_PCI_AD103_4080_SUPER;
+        load_rom(argv[1]);
+        regs[0]=0x193000a1;
+        regs[0x1183a4/4]=0x6000;regs[0x625f04/4]=1;regs[0x1fa7c8/4]=0x45cb8f;
+        regs[0x1fa82c/4]=0x100000;regs[0x1fa830/4]=0x5cffff0;
+        regs[GU_GFW_PLM_OFFSET/4]=1;regs[GU_GFW_BOOT_OFFSET/4]=0xff;
+        regs[GU_GFW_CPUCTL_OFFSET/4]=0x10;
+        /* Cold values seen on the reference AD103 board. */
+        regs[GU_FEAT_PLM_OFFSET/4]=0xffffff8f;regs[GU_FEAT_SS0_OFFSET/4]=0x31322012;
+        regs[GU_FEAT_SS1_OFFSET/4]=0x7;
+        fake.fwsec_wpr=1;
+        fake.fwsec_wpr_lo=(u32)(0x5ffe00000ull>>12)<<4;
+        fake.fwsec_wpr_hi=(u32)(0x5ffeff000ull>>12)<<4;
+        regs[(GU_FUSE_SEC2_UCODE1+2*4)/4]=1;
+        if(strcmp(argv[1],"-"))regs[(0x8241c0+8*4)/4]=1;
+        struct gpu_unlock_610_shared ad103_shared={0};last_work=NULL;
+        int ad103_ret=gpu_unlock_610_load_shared(&dev,&ad103_shared);
+        if(!ad103_ret)ad103_ret=gpu_unlock_610_unlock(&dev,&ad103_shared,false);
+        gpu_unlock_610_release_shared(&ad103_shared);
+        if(ad103_ret)fprintf(stderr,"AD103\n%s: error=%d\n",fake.log,ad103_ret);
+        assert(!ad103_ret);
+        assert(fake.gsp_starts==1 && fake.starts==1 && fake.flrs==1 && !fake.pins);
+        assert(fake.selector_writes==1 && fake.ss1_writes==1);
+        assert(regs[GU_FEAT_SS0_OFFSET/4]==0x88888888 && regs[GU_FEAT_SS1_OFFSET/4]==0x8);
+        assert(fake.cache_records==5 && fake.cache_released==5);
+        assert(!fake.live && !fake.regions && dev.refs==1);
+        assert(strstr(fake.log,"AD103 boot result: marker=0x67b00001"));
+        assert(strstr(fake.log,"AD103 PLM: FBPA=0xffffff0f") && strstr(fake.log,"required=0"));
+        puts("AD103 pinned firmware full transaction passed under mocked hardware");
     }
     puts("actual unlock_transaction radix, early-PLM and reset/retention checks passed");
 }

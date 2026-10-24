@@ -29,11 +29,77 @@
 #define GU_SS0_UNLOCK 0x88888888u
 #define GU_SS1_UNLOCK 0x8u
 #define BOOTER_MAGIC 0x314c5442u
-#define BOOTER_FILE "gpu-unlock/610.43.03/booter_load_ga102.bin"
-#define V67_FILE "gpu-unlock/610.43.03/v67-ga102-610.43.03.bin"
 #define GSP_FILE "gpu-unlock/610.43.03/gsp_ga10x.bin"
-#define BOOT_FILE "gpu-unlock/610.43.03/gsp_boot_ga102.bin"
-#define BOOT_DESC_FILE "gpu-unlock/610.43.03/gsp_boot_desc_ga102.bin"
+
+/*
+ * One chip family's assets and pinned firmware geometry. GA102 serves every
+ * GA10x card; the desktop AD103 parts use the AD102 Booter, GSP boot image and
+ * firmware signature. Both payloads are 610.43.03 rejoin-family images.
+ */
+struct unlock_profile {
+	const char *name;
+	u32 chip_id;		/* PMC_BOOT_0, BAR0 offset 0 */
+	const char *booter;
+	const char *v67;
+	const char *boot;
+	const char *boot_desc;
+	const char *sig_section;
+	u32 booter_image_size;
+	u32 boot_image_size;
+	u32 os_data_off;
+	u32 os_data_size;
+	u32 app_code_size;
+	u32 patch_loc;
+	u32 prom_view;		/* bytes of PROM mapping after BAR0+0x300000 */
+	u32 boot_marker;	/* payload's MAILBOX0 marker, 0 when none */
+};
+
+static const struct unlock_profile ga102_profile = {
+	.name = "GA102",
+	.chip_id = 0x172000a1u,
+	.booter = "gpu-unlock/610.43.03/booter_load_ga102.bin",
+	.v67 = "gpu-unlock/610.43.03/v67-ga102-610.43.03.bin",
+	.boot = "gpu-unlock/610.43.03/gsp_boot_ga102.bin",
+	.boot_desc = "gpu-unlock/610.43.03/gsp_boot_desc_ga102.bin",
+	.sig_section = ".fwsignature_ga10x",
+	.booter_image_size = 60416,
+	.boot_image_size = 24576,
+	.os_data_off = 35328,
+	.os_data_size = 25088,
+	.app_code_size = 35072,
+	.patch_loc = 35344,
+	.prom_view = 1024 * 1024,
+};
+
+/* AD103's BAR0 PROM view starts at ROM+0x9400; 0xd6c00 bytes are readable. */
+static const struct unlock_profile ad103_profile = {
+	.name = "AD103",
+	.chip_id = 0x193000a1u,
+	.booter = "gpu-unlock/610.43.03/booter_load_ad102.bin",
+	.v67 = "gpu-unlock/610.43.03/v67-ad102-610.43.03.bin",
+	.boot = "gpu-unlock/610.43.03/gsp_boot_ad102.bin",
+	.boot_desc = "gpu-unlock/610.43.03/gsp_boot_desc_ad102.bin",
+	.sig_section = ".fwsignature_ad10x",
+	.booter_image_size = 56832,
+	.boot_image_size = 36864,
+	.os_data_off = 32256,
+	.os_data_size = 24576,
+	.app_code_size = 32000,
+	.patch_loc = 32272,
+	.prom_view = 0xd6c00,
+	.boot_marker = 0x67b00001u,
+};
+
+static bool ad103_device(u16 device)
+{
+	return device == GU_PCI_AD103_4080_SUPER || device == GU_PCI_AD103_4080;
+}
+
+/* main.c only offers these supported device IDs; every other one is GA10x. */
+static const struct unlock_profile *unlock_profile(u16 device)
+{
+	return ad103_device(device) ? &ad103_profile : &ga102_profile;
+}
 
 struct unlock_transaction_page {
 	void *cpu;
@@ -42,6 +108,7 @@ struct unlock_transaction_page {
 
 struct unlock_transaction_work {
 	struct pci_dev *pdev;
+	const struct unlock_profile *profile;
 	bool resume;	/* bound to nvidia, which suspended it before sleep */
 	void __iomem *bar;
 	resource_size_t bar_len;
@@ -433,12 +500,13 @@ static int falcon_hs(struct unlock_transaction_work *work, const struct falcon_e
 
 static int load_booter(struct unlock_transaction_work *work)
 {
+	const struct unlock_profile *p = work->profile;
 	const u8 *data;
 	u32 magic, version, image_size, sig_bytes;
 	struct gpu_unlock_booter_hdr hdr;
 	int ret;
 
-	ret = request_asset(work, &work->booter_fw, BOOTER_FILE);
+	ret = request_asset(work, &work->booter_fw, p->booter);
 	if (ret)
 		return GU_RESULT(ret);
 	data = work->booter_fw->data;
@@ -452,16 +520,16 @@ static int load_booter(struct unlock_transaction_work *work)
 	memcpy(&image_size, data + 8 + sizeof(hdr), sizeof(image_size));
 	memcpy(&sig_bytes, data + 12 + sizeof(hdr), sizeof(sig_bytes));
 	if (!hdr.ucode_id || hdr.num_apps != 1 || sig_bytes != hdr.sig_bytes ||
-	    image_size != GU_BOOTER_IMAGE_SIZE ||
+	    image_size != p->booter_image_size ||
 	    work->booter_fw->size != 72u + image_size + sig_bytes)
 		return GU_RESULT(-EINVAL);
 	/* Only this pinned production BOOT_FROM_HS geometry is implemented. */
 	if (hdr.ucode_id != 3 || hdr.engine_id != 1 || hdr.num_sigs != 2 ||
 	    sig_bytes != GU_BOOTER_SIG_TOTAL || hdr.os_code_off != 0 ||
-	    hdr.os_code_size != 256 || hdr.os_data_off != 35328 ||
-	    hdr.os_data_size != 25088 || hdr.app_code_off != 256 ||
-	    hdr.app_code_size != 35072 || hdr.app_data_off != 256 ||
-	    hdr.app_data_size != 0 || hdr.patch_loc != 35344)
+	    hdr.os_code_size != 256 || hdr.os_data_off != p->os_data_off ||
+	    hdr.os_data_size != p->os_data_size || hdr.app_code_off != 256 ||
+	    hdr.app_code_size != p->app_code_size || hdr.app_data_off != 256 ||
+	    hdr.app_data_size != 0 || hdr.patch_loc != p->patch_loc)
 		return GU_RESULT(-EINVAL);
 	work->booter_hdr = hdr;
 	work->booter_image_size = image_size;
@@ -506,7 +574,7 @@ static void free_coherent(struct unlock_transaction_work *work)
 		work->fwsec_cpu = NULL;
 	}
 	if (work->booter_cpu)
-		dma_free_coherent(&work->pdev->dev, GU_BOOTER_IMAGE_SIZE,
+		dma_free_coherent(&work->pdev->dev, work->booter_image_size,
 				  work->booter_cpu, work->booter_dma);
 	if (work->v67_cpu)
 		dma_free_coherent(&work->pdev->dev, GU_V67_SIZE, work->v67_cpu,
@@ -609,6 +677,7 @@ static int unlock_transaction_unwind(struct unlock_transaction_work *work)
 
 static int unlock_transaction_assets(struct unlock_transaction_work *work)
 {
+	const struct unlock_profile *p = work->profile;
 	const struct firmware *desc;
 	int ret;
 
@@ -617,7 +686,7 @@ static int unlock_transaction_assets(struct unlock_transaction_work *work)
 		if (ret)
 			return ret;
 	}
-	ret = request_asset(work, &work->v67_fw, V67_FILE);
+	ret = request_asset(work, &work->v67_fw, p->v67);
 	if (ret)
 		return GU_RESULT(ret);
 	if (work->v67_fw->size != GU_V67_SIZE)
@@ -627,7 +696,7 @@ static int unlock_transaction_assets(struct unlock_transaction_work *work)
 	if (ret)
 		return GU_RESULT(ret);
 	ret = gpu_unlock_elf_section(work->gsp_fw->data, work->gsp_fw->size,
-				    ".fwsignature_ga10x", &work->sig_span);
+				    p->sig_section, &work->sig_span);
 	if (ret)
 		return GU_RESULT(ret);
 	if (!work->image_span.size || work->image_span.size > 128ull << 20 ||
@@ -636,12 +705,12 @@ static int unlock_transaction_assets(struct unlock_transaction_work *work)
 	ret = gpu_unlock_radix_plan(work->image_span.size, &work->radix);
 	if (ret)
 		return GU_RESULT(ret);
-	ret = request_asset(work, &work->boot_fw, BOOT_FILE);
+	ret = request_asset(work, &work->boot_fw, p->boot);
 	if (ret)
 		return GU_RESULT(ret);
-	if (work->boot_fw->size != 24576)
+	if (work->boot_fw->size != p->boot_image_size)
 		return GU_RESULT(-EINVAL);
-	ret = request_asset(work, &desc, BOOT_DESC_FILE);
+	ret = request_asset(work, &desc, p->boot_desc);
 	if (ret)
 		return GU_RESULT(ret);
 	ret = gpu_unlock_boot_desc_parse(desc->data, desc->size,
@@ -926,7 +995,7 @@ static int unlock_transaction_fwsec(struct unlock_transaction_work *work)
 	size_t mapped = 0;
 	u8 *rom = NULL;
 	struct gpu_unlock_fwsec fw;
-	u32 fuse_raw, version, scratch, wpr_lo, wpr_hi;
+	u32 fuse_raw, version, scratch, wpr_lo, wpr_hi, dmem_transfer;
 	u16 command;
 	u64 frts = work->layout.frts_offset;
 	void *image = NULL;
@@ -934,11 +1003,13 @@ static int unlock_transaction_fwsec(struct unlock_transaction_work *work)
 	int ret;
 
 	/* kgspExtractVbiosFromRom_TU102 reads NV_PROM_DATA, up to 1 MiB.
-	 * pci_map_rom stops at the PCI last-image flag and hides the VN extension. */
-	dev_info(&work->pdev->dev, "FWSEC: reading PROM at %#x\n", 0x300000);
+	 * pci_map_rom stops at the PCI last-image flag and hides the VN extension.
+	 * AD103 exposes less than 1 MiB at the same BAR0 offset. */
+	dev_info(&work->pdev->dev, "FWSEC: reading PROM at %#x bytes=%u\n",
+		 0x300000, work->profile->prom_view);
 	if (work->bar_len < 0x300000 + 0x1a)
 		return GU_RESULT(-ENODEV);
-	mapped = min_t(size_t, 1024 * 1024, work->bar_len - 0x300000);
+	mapped = min_t(size_t, work->profile->prom_view, work->bar_len - 0x300000);
 	rom = kvmalloc(mapped, GFP_KERNEL);
 	if (!rom)
 		return GU_RESULT(-ENOMEM);
@@ -955,6 +1026,13 @@ static int unlock_transaction_fwsec(struct unlock_transaction_work *work)
 		ret = -EOPNOTSUPP;
 		goto out;
 	}
+	/* Falcon DMA moves whole 256-byte packets, and AD103 declares a DMEM
+	 * size that is not a multiple of 256. */
+	ret = gpu_unlock_fwsec_dmem_transfer(&fw, &dmem_transfer);
+	if (ret)
+		goto out;
+	dev_info(&work->pdev->dev, "FWSEC DMEM: declared=%#x transfer=%#x image=%#x\n",
+		 fw.dmem_size, dmem_transfer, fw.image_size);
 	image = diag_dma_alloc(work, "fwsec", fw.image_size, &image_dma, GFP_KERNEL);
 	if (!image) {
 		ret = -ENOMEM;
@@ -991,7 +1069,7 @@ static int unlock_transaction_fwsec(struct unlock_transaction_work *work)
 	}
 	work->firmware_started = true;
 	ret = falcon_hs(work, &gsp, 0, fw.imem_size, fw.imem_va, fw.imem_pa,
-			fw.data_off, fw.dmem_size, fw.dmem_pa, fw.pkc_off,
+			fw.data_off, dmem_transfer, fw.dmem_pa, fw.pkc_off,
 			fw.engine_mask, fw.ucode_id,
 			image_dma, 0, 0, false);
 	if (ret)
@@ -1124,6 +1202,57 @@ static int unlock_transaction_boot(struct unlock_transaction_work *work)
 			h->patch_loc - h->os_data_off, h->engine_id, h->ucode_id,
 			work->booter_dma, lower_32_bits(work->meta_dma),
 			upper_32_bits(work->meta_dma), true));
+}
+
+/* AD103's payload writes all four PLMs and a completion marker in one SEC2 run.
+ * The FEAT PLM transition has already proven payload execution; this confirms
+ * the other writes, the marker and that SEC2 halted. The reference run left
+ * FBPA at 0xffffff0f, so only a rejected write there is not fatal.
+ */
+static int unlock_transaction_verify_ad103(struct unlock_transaction_work *work)
+{
+	static const struct {
+		u32 offset, expected;
+		const char *name;
+		bool required;
+	} plm[] = {
+		{ 0x001fa7cc, 0xfffff0ffu, "WPR_CFG", true },
+		{ 0x009a0148, 0xffffffffu, "FBPA", false },
+		{ 0x001fa7c4, 0xffffffffu, "WPR", true },
+		{ GU_FEAT_PLM_OFFSET, 0xffffffffu, "FEAT", true },
+	};
+	u32 marker, debug, cpuctl;
+	bool failed = false;
+	unsigned int i;
+	int ret;
+
+	ret = poll_us(work, SEC2_BASE + 0x100, GU_GFW_CPUCTL_HALTED,
+		      GU_GFW_CPUCTL_HALTED, 5000000, true);
+	if (ret)
+		return GU_RESULT(ret);
+	if (read_bar(work, SEC2_BASE + 0x40, &marker) ||
+	    read_bar(work, SEC2_BASE + 0x94, &debug) ||
+	    read_bar(work, SEC2_BASE + 0x100, &cpuctl) || inaccessible(cpuctl))
+		return GU_RESULT(-ENODEV);
+	for (i = 0; i < ARRAY_SIZE(plm); i++) {
+		u32 value;
+
+		/* All ones is the expected value, unlike an unreadable sentinel. */
+		if (read_bar(work, plm[i].offset, &value) ||
+		    (value & 0xffff0000u) == 0xbadf0000u)
+			return GU_RESULT(-ENODEV);
+		dev_info(&work->pdev->dev, "AD103 PLM: %s=%#x expected=%#x matched=%u required=%u\n",
+			 plm[i].name, value, plm[i].expected, value == plm[i].expected,
+			 plm[i].required);
+		if (plm[i].required && value != plm[i].expected)
+			failed = true;
+	}
+	dev_info(&work->pdev->dev,
+		 "AD103 boot result: marker=%#x expected=%#x debug=%#x expected=%#x cpuctl=%#x halted=1 plm_required_ok=%u\n",
+		 marker, work->profile->boot_marker, debug, 0xda550000u, cpuctl, !failed);
+	if (marker != work->profile->boot_marker || debug != 0xda550000u)
+		failed = true;
+	return GU_RESULT(failed ? -EIO : 0);
 }
 
 static void put_le64(u8 *dest, u64 value)
@@ -1451,7 +1580,10 @@ int gpu_unlock_610_unlock(struct pci_dev *pdev, const struct gpu_unlock_610_shar
 		return -ENOMEM;
 	work->pdev = pci_dev_get(pdev);
 	work->gsp_fw = shared->gsp;
+	work->profile = unlock_profile(pdev->device);
 	work->resume = resume;
+	dev_info(&pdev->dev, "profile: %s chip=%#x\n",
+		 work->profile->name, work->profile->chip_id);
 	/* After resume GFW may still be running: check and wait before reading
 	 * the layout, and before loading assets for a card that kept power. */
 	ret = resume ? unlock_transaction_suspended(work) : 0;
@@ -1471,6 +1603,8 @@ int gpu_unlock_610_unlock(struct pci_dev *pdev, const struct gpu_unlock_610_shar
 		ret = unlock_transaction_signature(work);	/* publish V67 */
 	if (!ret)
 		ret = unlock_transaction_boot(work);
+	if (!ret && work->profile->boot_marker)
+		ret = unlock_transaction_verify_ad103(work);
 	if (!ret)
 		ret = unlock_transaction_signature(work);	/* restore stock */
 	if (!ret)
@@ -1495,8 +1629,12 @@ int gpu_unlock_610_unlock(struct pci_dev *pdev, const struct gpu_unlock_610_shar
 	return ret;
 }
 
-MODULE_FIRMWARE(BOOTER_FILE);
-MODULE_FIRMWARE(V67_FILE);
 MODULE_FIRMWARE(GSP_FILE);
-MODULE_FIRMWARE(BOOT_FILE);
-MODULE_FIRMWARE(BOOT_DESC_FILE);
+MODULE_FIRMWARE("gpu-unlock/610.43.03/booter_load_ga102.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/v67-ga102-610.43.03.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/gsp_boot_ga102.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/gsp_boot_desc_ga102.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/booter_load_ad102.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/v67-ad102-610.43.03.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/gsp_boot_ad102.bin");
+MODULE_FIRMWARE("gpu-unlock/610.43.03/gsp_boot_desc_ad102.bin");

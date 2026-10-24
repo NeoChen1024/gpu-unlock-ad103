@@ -39,4 +39,7 @@ int gpu_unlock_fwsec_patch_frts(u8 *image, const struct gpu_unlock_fwsec *fw,
 int gpu_unlock_fwsec_sig_offset(u32 versions, u32 fuse_version, u32 sig_size,
 				u32 *offset);
 
+/* DMEM bytes to transfer: the declared size rounded up to 256 bytes. */
+int gpu_unlock_fwsec_dmem_transfer(const struct gpu_unlock_fwsec *fw, u32 *bytes);
+
 #endif
